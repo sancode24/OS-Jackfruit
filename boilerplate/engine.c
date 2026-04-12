@@ -21,7 +21,9 @@
  *   sudo ./engine stop alpha
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,7 +39,13 @@
 #include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/resource.h>
 #include <sched.h>
+
+/* Suppress warn_unused_result on write() calls to sockets/pipes */
+static inline void write_fd(int fd, const void *buf, size_t n) {
+    ssize_t r = write(fd, buf, n); (void)r;
+}
 
 /* ─────────────────────────────────────────────
  * Constants
@@ -318,7 +326,7 @@ static void cmd_ps(int fd) {
     }
     pthread_mutex_unlock(&g_meta_lock);
 
-    write(fd, buf, n);
+    write_fd(fd, buf, n);
 }
 
 /* ─────────────────────────────────────────────
@@ -332,14 +340,14 @@ static void process_command(const char *line, int fd) {
 
     /* Tokenise the command */
     if (sscanf(line, "%31s", cmd) != 1) {
-        write(fd, "ERR bad command\n", 16);
+        write_fd(fd, "ERR bad command\n", 16);
         return;
     }
 
     /* ── start <id> <rootfs> <cmd> [--soft-mib N] [--hard-mib N] [--nice N] ── */
     if (strcmp(cmd, "start") == 0 || strcmp(cmd, "run") == 0) {
         if (sscanf(line, "%*s %63s %255s %255s", id, rootfs, exec_cmd) != 3) {
-            write(fd, "ERR usage: start <id> <rootfs> <cmd>\n", 37);
+            write_fd(fd, "ERR usage: start <id> <rootfs> <cmd>\n", 37);
             return;
         }
         /* Parse optional flags */
@@ -355,14 +363,14 @@ static void process_command(const char *line, int fd) {
         pthread_mutex_unlock(&g_meta_lock);
         if (dup >= 0) {
             snprintf(resp, sizeof(resp), "ERR container '%s' already exists\n", id);
-            write(fd, resp, strlen(resp));
+            write_fd(fd, resp, strlen(resp));
             return;
         }
 
         pid_t pid = launch_container(id, rootfs, exec_cmd, soft_mib, hard_mib);
         if (pid < 0) {
             snprintf(resp, sizeof(resp), "ERR failed to start container '%s'\n", id);
-            write(fd, resp, strlen(resp));
+            write_fd(fd, resp, strlen(resp));
             return;
         }
 
@@ -370,7 +378,7 @@ static void process_command(const char *line, int fd) {
         if (nice_val != 0) setpriority(PRIO_PROCESS, pid, nice_val);
 
         snprintf(resp, sizeof(resp), "OK started '%s' pid=%d\n", id, pid);
-        write(fd, resp, strlen(resp));
+        write_fd(fd, resp, strlen(resp));
 
         /* For 'run': block until container exits */
         if (strcmp(cmd, "run") == 0) {
@@ -379,7 +387,7 @@ static void process_command(const char *line, int fd) {
             int ec = WIFEXITED(status) ? WEXITSTATUS(status)
                                        : 128 + WTERMSIG(status);
             snprintf(resp, sizeof(resp), "OK '%s' exited status=%d\n", id, ec);
-            write(fd, resp, strlen(resp));
+            write_fd(fd, resp, strlen(resp));
         }
         return;
     }
@@ -393,7 +401,7 @@ static void process_command(const char *line, int fd) {
     /* ── logs <id> ── */
     if (strcmp(cmd, "logs") == 0) {
         if (sscanf(line, "%*s %63s", id) != 1) {
-            write(fd, "ERR usage: logs <id>\n", 21);
+            write_fd(fd, "ERR usage: logs <id>\n", 21);
             return;
         }
         pthread_mutex_lock(&g_meta_lock);
@@ -405,20 +413,20 @@ static void process_command(const char *line, int fd) {
 
         if (slot < 0) {
             snprintf(resp, sizeof(resp), "ERR unknown container '%s'\n", id);
-            write(fd, resp, strlen(resp));
+            write_fd(fd, resp, strlen(resp));
             return;
         }
         /* Stream the log file */
         int lfd = open(log_path, O_RDONLY | O_CREAT, 0644);
         if (lfd < 0) {
             snprintf(resp, sizeof(resp), "ERR cannot open log '%s'\n", log_path);
-            write(fd, resp, strlen(resp));
+            write_fd(fd, resp, strlen(resp));
             return;
         }
         char chunk[4096];
         ssize_t nr;
         while ((nr = read(lfd, chunk, sizeof(chunk))) > 0)
-            write(fd, chunk, nr);
+            write_fd(fd, chunk, nr);
         close(lfd);
         return;
     }
@@ -426,7 +434,7 @@ static void process_command(const char *line, int fd) {
     /* ── stop <id> ── */
     if (strcmp(cmd, "stop") == 0) {
         if (sscanf(line, "%*s %63s", id) != 1) {
-            write(fd, "ERR usage: stop <id>\n", 21);
+            write_fd(fd, "ERR usage: stop <id>\n", 21);
             return;
         }
         pthread_mutex_lock(&g_meta_lock);
@@ -434,7 +442,7 @@ static void process_command(const char *line, int fd) {
         if (slot < 0) {
             pthread_mutex_unlock(&g_meta_lock);
             snprintf(resp, sizeof(resp), "ERR unknown container '%s'\n", id);
-            write(fd, resp, strlen(resp));
+            write_fd(fd, resp, strlen(resp));
             return;
         }
         pid_t pid = g_containers[slot].host_pid;
@@ -444,7 +452,7 @@ static void process_command(const char *line, int fd) {
 
         if (cur != STATE_RUNNING && cur != STATE_STARTING) {
             snprintf(resp, sizeof(resp), "OK container '%s' is not running\n", id);
-            write(fd, resp, strlen(resp));
+            write_fd(fd, resp, strlen(resp));
             return;
         }
         /* Send SIGTERM first, then SIGKILL after a grace period */
@@ -467,19 +475,19 @@ static void process_command(const char *line, int fd) {
         if (still) kill(pid, SIGKILL);
 
         snprintf(resp, sizeof(resp), "OK stop signalled '%s'\n", id);
-        write(fd, resp, strlen(resp));
+        write_fd(fd, resp, strlen(resp));
         return;
     }
 
     /* ── shutdown (internal) ── */
     if (strcmp(cmd, "shutdown") == 0) {
         g_supervisor_running = 0;
-        write(fd, "OK shutting down\n", 17);
+        write_fd(fd, "OK shutting down\n", 17);
         return;
     }
 
     snprintf(resp, sizeof(resp), "ERR unknown command '%s'\n", cmd);
-    write(fd, resp, strlen(resp));
+    write_fd(fd, resp, strlen(resp));
 }
 
 /* ─────────────────────────────────────────────
@@ -593,7 +601,7 @@ static void send_command(int argc, char *argv[]) {
     }
 
     /* Send the command */
-    write(fd, line, strlen(line));
+    write_fd(fd, line, strlen(line));
     shutdown(fd, SHUT_WR);   /* signal EOF to supervisor */
 
     /* Print the response */
