@@ -207,4 +207,26 @@ static int run_supervisor(const char *rootfs) {
 
             pthread_t ptid;
             pthread_create(&ptid, NULL, producer_thread, p_info);
-            pthread_detach
+            pthread_detach(ptid);
+
+            snprintf(res.message, CONTROL_MESSAGE_LEN, "Started %s (PID %d)", req.container_id, pid);
+        }
+        write(client_fd, &res, sizeof(res));
+        close(client_fd);
+    }
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) return 1;
+    if (strcmp(argv[1], "supervisor") == 0) return run_supervisor(argv[2]);
+    if (strcmp(argv[1], "start") == 0) {
+        if (argc < 5) return 1;
+        control_request_t req = { .kind = CMD_START };
+        strncpy(req.container_id, argv[2], 31); 
+        strncpy(req.rootfs, argv[3], PATH_MAX-1); 
+        strncpy(req.command, argv[4], 255);
+        return send_control_request(&req);
+    }
+    return 0;
+}
